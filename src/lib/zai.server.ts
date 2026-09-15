@@ -14,10 +14,25 @@ import { assertActive, killableSignal, KilledError } from "./kill-switch.server"
 
 const API = "https://api.z.ai/api/paas/v4/chat/completions";
 
+/**
+ * Free Z.ai text models, best first. `glm-4.7-flash` is the strongest, but its
+ * free capacity is often exhausted (HTTP 429, code 1305 "temporarily
+ * overloaded") — in that case the next model in the chain answers immediately
+ * instead of the whole first batch failing with "writer busy".
+ */
+export function modelChain(): string[] {
+  const override = process.env["ZAI_MODEL"]?.trim();
+  const chain = override ? [override] : ["glm-4.7-flash", "glm-4.5-flash"];
+  const extra = process.env["ZAI_MODEL_FALLBACK"]?.trim();
+  if (extra && !chain.includes(extra)) chain.push(extra);
+  return chain;
+}
+
 /** Fixed model. Override with the ZAI_MODEL secret if the id changes. */
 export function model(): string {
-  return process.env["ZAI_MODEL"]?.trim() || "glm-4.7-flash";
+  return modelChain()[0] as string;
 }
+
 
 function apiKey(): string {
   const key = process.env["ZAI_API_KEY"]?.trim();
