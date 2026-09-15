@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { analyzeScript, renderImage, renderBatch } from "@/lib/manga.functions";
+import { analyzeScript, renderImage, renderBatch, verifyPrompts } from "@/lib/manga.functions";
 
 import { buildTimeline, fmt, scriptEndTime, type Segment } from "@/lib/script";
 import { buildVideo, webCodecsSupported } from "@/lib/video";
@@ -109,6 +109,12 @@ const SAMPLE = `(0:00)Henan की कहानी असुरा का उद
  * less likely to trip.
  */
 const PROMPT_RANGE = 20;
+
+/**
+ * Timestamps rechecked per verification pass. Verification runs after ALL
+ * prompts are written and before any image is drawn.
+ */
+const VERIFY_BATCH = 10;
 
 /**
  * Image pipeline shape: TEN Pixazo keys, THREE images per key at a time.
@@ -372,6 +378,7 @@ function Index() {
 
   const draw = useServerFn(renderImage);
   const drawBatch = useServerFn(renderBatch);
+  const verify = useServerFn(verifyPrompts);
   const killRuns = useServerFn(instaKill);
 
   const [script, setScript] = useState("");
@@ -739,8 +746,9 @@ function Index() {
                 return;
               }
               const prompt = (slot as string).trim();
+              // Nothing is queued for drawing yet: every prompt is written
+              // first, then verified, and only then drawn.
               record(s.index, { prompt, status: "waiting" });
-              queue.push({ seg: s as Shot, prompt, attempts: 0 });
             });
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -785,7 +793,6 @@ function Index() {
                 if (hasPrompt(slot)) {
                   const prompt = (slot as string).trim();
                   record(s.index, { prompt, status: "waiting", error: undefined });
-                  if (!s.url) queue.push({ seg: s as Shot, prompt, attempts: 0 });
                   return;
                 }
                 record(s.index, { prompt: undefined, status: "error", error: "prompt missing" });
