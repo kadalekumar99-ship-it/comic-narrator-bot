@@ -1054,6 +1054,15 @@ function Index() {
             }
             record(seg.index, { prompt: r.prompt, status: "waiting", error: undefined });
           });
+          const rewritten = results.filter((r) => r.status === "rewritten").length;
+          const failed = results.filter((r) => r.status === "failed").length;
+          logInfo(
+            "verify",
+            `Checked panels ${group[0] ? group[0].index + 1 : i + 1}-${
+              group[group.length - 1] ? (group[group.length - 1] as Shot).index + 1 : i + group.length
+            }: ${results.length - rewritten - failed} kept, ${rewritten} rewritten, ${failed} still bad`,
+          );
+
         } catch (e) {
           if (isCancellation(e) || !isCurrentRun()) {
             cancelRef.current = true;
