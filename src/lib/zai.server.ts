@@ -165,6 +165,11 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
     const attempts = opts.attempts ?? 14;
 
     let lastErr = "";
+    // Best model first; a busy one is swapped for the next free model instead
+    // of failing the batch.
+    const models = modelChain();
+    let mi = 0;
+    const current = () => models[Math.min(mi, models.length - 1)] as string;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const started = Date.now();
@@ -174,7 +179,7 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
       // never triggers the provider's edge rate limit in the first place.
       await waitForSlot();
       console.log(
-        `[zai] request attempt ${attempt + 1}/${attempts} model=${model()} inChars=${user.length} maxOut=${Math.min(MAX_OUT, opts.maxOutputTokens ?? 16_000)}`,
+        `[zai] request attempt ${attempt + 1}/${attempts} model=${current()} inChars=${user.length} maxOut=${Math.min(MAX_OUT, opts.maxOutputTokens ?? 16_000)}`,
       );
       // Generous by design: a long answer may legitimately stream for an hour.
       const gate = killableSignal(opts.timeoutMs ?? 3_600_000);
@@ -190,7 +195,8 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
           Authorization: `Bearer ${apiKey()}`,
         },
         body: JSON.stringify({
-          model: model(),
+          model: current(),
+
           messages: [
             ...(opts.system ? [{ role: "system", content: opts.system }] : []),
             { role: "user", content: user },
