@@ -268,7 +268,10 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
           if (attempt + 1 < attempts) {
             await backoff(wait);
           }
+          // After the wait, start again from the best model.
+          mi = 0;
           continue;
+
         }
 
 
