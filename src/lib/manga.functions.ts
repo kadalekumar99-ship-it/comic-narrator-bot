@@ -8,6 +8,7 @@ import {
   writePrompts,
   renderPanel,
 } from "./manga.server";
+import { verifyPromptBatch } from "./verify.server";
 import { engineStatus } from "./zai.server";
 import { withRun, KilledError } from "./kill-switch.server";
 
@@ -77,6 +78,45 @@ export const promptsForRange = createServerFn({ method: "POST" })
       const prompts = await writePrompts(data.bible, data.segments, data.from, data.to);
       return { from: data.from, to: data.to, prompts, engine: engineStatus() };
     }, signal);
+  });
+
+/**
+ * Verification pass. Runs after ALL prompts are written and before any image
+ * is generated: each prompt is rechecked against its own timestamp and script
+ * line, and blank / incomplete / mismatched ones are rewritten.
+ */
+export const verifyPrompts = createServerFn({ method: "POST" })
+  .inputValidator((d: unknown) =>
+    z
+      .object({
+        bible: z.string(),
+        items: z
+          .array(
+            z.object({
+              n: z.number().int().min(1),
+              start: z.number(),
+              end: z.number(),
+              text: z.string(),
+              prompt: z.string(),
+            }),
+          )
+          .min(1)
+          .max(20),
+        segments: z.array(SegmentSchema).min(1),
+        runAt: z.number().optional(),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data }) => {
+    const signal = getRequest().signal;
+    return withRun(
+      data.runAt,
+      async () => {
+        const results = await verifyPromptBatch(data.bible, data.items, data.segments);
+        return { results, engine: engineStatus() };
+      },
+      signal,
+    );
   });
 
 export const renderImage = createServerFn({ method: "POST" })
