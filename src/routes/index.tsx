@@ -1005,11 +1005,77 @@ function Index() {
         if (fatal) throw fatal.reason;
       };
 
-      const imageStage = runLanes();
+      // Stage 1 must finish completely: every timestamp gets its prompt before
+      // anything is checked or drawn.
       await promptStage;
       promptingDone = true;
       tick(true);
-      await imageStage;
+
+      // Stage 2: verification. Each written prompt is rechecked one by one
+      // against its own timestamp and script line; blank, incomplete or
+      // mismatched prompts are rewritten before a single image is generated.
+      const toCheck = list.filter((s) => hasPrompt(s.prompt) && !s.url);
+      let checked = 0;
+      setNote(`Checking prompts 0/${toCheck.length}…`);
+      for (let i = 0; i < toCheck.length && !cancelRef.current; i += VERIFY_BATCH) {
+        const group = toCheck.slice(i, i + VERIFY_BATCH);
+        group.forEach((s) => record(s.index, { status: "prompting" }));
+        try {
+          const { results } = await killable((signal) =>
+            verify({
+              data: {
+                ...stamp(),
+                bible: b,
+                segments: allSegments,
+                items: group.map((s) => ({
+                  n: s.index + 1,
+                  start: s.start,
+                  end: s.end,
+                  text: s.text,
+                  prompt: (s.prompt as string).trim(),
+                })),
+              },
+              signal,
+            }),
+          );
+          results.forEach((r) => {
+            const seg = group.find((s) => s.index + 1 === r.n);
+            if (!seg) return;
+            if (r.status === "failed" || !hasPrompt(r.prompt)) {
+              logWarn("verify", `Panel #${r.n}: ${r.reason ?? "prompt failed the check"}`);
+              record(seg.index, {
+                status: "error",
+                error: r.reason ?? "prompt failed the check",
+              });
+              return;
+            }
+            if (r.status === "rewritten") {
+              logWarn("verify", `Panel #${r.n} rewritten: ${r.reason ?? "prompt did not match"}`);
+            }
+            record(seg.index, { prompt: r.prompt, status: "waiting", error: undefined });
+          });
+        } catch (e) {
+          if (isCancellation(e) || !isCurrentRun()) {
+            cancelRef.current = true;
+            break;
+          }
+          logFailure("verify", `Prompt check for panels ${i + 1}-${i + group.length} failed`, e);
+          group.forEach((s) => record(s.index, { status: "waiting" }));
+        }
+        checked += group.length;
+        setNote(`Checking prompts ${checked}/${toCheck.length}…`);
+        await checkpoint();
+      }
+      tick(true);
+
+      // Stage 3: images — only now, with every prompt written and verified.
+      queue.length = 0;
+      for (const s of list) {
+        if (hasPrompt(s.prompt) && !s.url) {
+          queue.push({ seg: s, prompt: (s.prompt as string).trim(), attempts: 0 });
+        }
+      }
+      if (queue.length > 0 && !cancelRef.current) await runLanes();
 
       // Safety net: anything that gained a prompt but never got drawn (for
       // example a lane that exited just as a repair prompt landed) is drawn now.
