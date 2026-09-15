@@ -14,10 +14,25 @@ import { assertActive, killableSignal, KilledError } from "./kill-switch.server"
 
 const API = "https://api.z.ai/api/paas/v4/chat/completions";
 
+/**
+ * Free Z.ai text models, best first. `glm-4.7-flash` is the strongest, but its
+ * free capacity is often exhausted (HTTP 429, code 1305 "temporarily
+ * overloaded") — in that case the next model in the chain answers immediately
+ * instead of the whole first batch failing with "writer busy".
+ */
+export function modelChain(): string[] {
+  const override = process.env["ZAI_MODEL"]?.trim();
+  const chain = override ? [override] : ["glm-4.7-flash", "glm-4.5-flash"];
+  const extra = process.env["ZAI_MODEL_FALLBACK"]?.trim();
+  if (extra && !chain.includes(extra)) chain.push(extra);
+  return chain;
+}
+
 /** Fixed model. Override with the ZAI_MODEL secret if the id changes. */
 export function model(): string {
-  return process.env["ZAI_MODEL"]?.trim() || "glm-4.7-flash";
+  return modelChain()[0] as string;
 }
+
 
 function apiKey(): string {
   const key = process.env["ZAI_API_KEY"]?.trim();
@@ -150,6 +165,11 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
     const attempts = opts.attempts ?? 14;
 
     let lastErr = "";
+    // Best model first; a busy one is swapped for the next free model instead
+    // of failing the batch.
+    const models = modelChain();
+    let mi = 0;
+    const current = () => models[Math.min(mi, models.length - 1)] as string;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const started = Date.now();
@@ -159,7 +179,7 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
       // never triggers the provider's edge rate limit in the first place.
       await waitForSlot();
       console.log(
-        `[zai] request attempt ${attempt + 1}/${attempts} model=${model()} inChars=${user.length} maxOut=${Math.min(MAX_OUT, opts.maxOutputTokens ?? 16_000)}`,
+        `[zai] request attempt ${attempt + 1}/${attempts} model=${current()} inChars=${user.length} maxOut=${Math.min(MAX_OUT, opts.maxOutputTokens ?? 16_000)}`,
       );
       // Generous by design: a long answer may legitimately stream for an hour.
       const gate = killableSignal(opts.timeoutMs ?? 3_600_000);
@@ -175,7 +195,8 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
           Authorization: `Bearer ${apiKey()}`,
         },
         body: JSON.stringify({
-          model: model(),
+          model: current(),
+
           messages: [
             ...(opts.system ? [{ role: "system", content: opts.system }] : []),
             { role: "user", content: user },
@@ -219,9 +240,18 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
           // quota block: retrying a few seconds later succeeds. A real
           // rate-limit block (1015) pauses everyone for much longer.
           const overloaded = /\b1305\b|temporarily overloaded/i.test(body);
+          // The best free model being full is not a reason to stall the whole
+          // run: switch to the next free model right away.
+          if (overloaded && mi + 1 < models.length) {
+            const from = current();
+            mi++;
+            console.error(`[zai] ${from} is full — switching to ${current()}`);
+            continue;
+          }
           const rateLimited =
             !overloaded && (/1015/.test(body) || /rate limit|too many requests/i.test(body));
           const retryAfter = Number(res.headers.get("retry-after") ?? 0);
+
           const base = rateLimited
             ? Math.min(MAX_RETRY_DELAY_MS, 60_000 * 2 ** attempt)
             : Math.min(30_000, 3_000 * 2 ** Math.min(attempt, 3));
@@ -238,7 +268,10 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
           if (attempt + 1 < attempts) {
             await backoff(wait);
           }
+          // After the wait, start again from the best model.
+          mi = 0;
           continue;
+
         }
 
 
