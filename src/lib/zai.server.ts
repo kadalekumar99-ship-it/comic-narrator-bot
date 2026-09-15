@@ -240,9 +240,18 @@ async function callZai(user: string, opts: ChatOptions): Promise<string> {
           // quota block: retrying a few seconds later succeeds. A real
           // rate-limit block (1015) pauses everyone for much longer.
           const overloaded = /\b1305\b|temporarily overloaded/i.test(body);
+          // The best free model being full is not a reason to stall the whole
+          // run: switch to the next free model right away.
+          if (overloaded && mi + 1 < models.length) {
+            const from = current();
+            mi++;
+            console.error(`[zai] ${from} is full — switching to ${current()}`);
+            continue;
+          }
           const rateLimited =
             !overloaded && (/1015/.test(body) || /rate limit|too many requests/i.test(body));
           const retryAfter = Number(res.headers.get("retry-after") ?? 0);
+
           const base = rateLimited
             ? Math.min(MAX_RETRY_DELAY_MS, 60_000 * 2 ** attempt)
             : Math.min(30_000, 3_000 * 2 ** Math.min(attempt, 3));
