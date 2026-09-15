@@ -99,29 +99,41 @@ export async function verifyPromptBatch(
     }
   }
 
-  if (suspect.length === 0) return items.map((i) => out.get(i.n) as VerifyResult);
-
-  // One model pass rewrites every suspect entry of this batch, keeping the
-  // numbering so each answer lands on its own timestamp.
+  // EVERY prompt is audited by the model against its own timestamp — not only
+  // the ones that failed the cheap local checks. A prompt that reads fine but
+  // depicts the wrong moment can only be caught here.
   try {
-    const raw = await zaiChat(auditInstruction(bible, suspect), {
+    const raw = await zaiChat(auditInstruction(bible, items), {
       temperature: 0.5,
-      maxOutputTokens: Math.min(20_000, 400 * suspect.length + 800),
+      maxOutputTokens: Math.min(20_000, 400 * items.length + 800),
     });
-    const parsed = parseNumberedList(raw, suspect.length);
-    suspect.forEach((item, i) => {
+    const parsed = parseNumberedList(raw, items.length);
+    items.forEach((item, i) => {
       const candidate = (parsed[i] ?? "").trim();
       if (!candidate) return;
       const cleaned = sanitizePrompt(candidate);
       const problem = localCheck({ ...item, prompt: cleaned });
       if (problem) return;
-      out.set(item.n, { n: item.n, prompt: cleaned, status: "rewritten" });
+      const before = sanitizePrompt((item.prompt ?? "").trim());
+      const changed = cleaned.replace(/\s+/g, " ") !== before.replace(/\s+/g, " ");
+      const previous = out.get(item.n) as VerifyResult;
+      if (!changed) {
+        out.set(item.n, { n: item.n, prompt: cleaned, status: "ok" });
+        return;
+      }
+      out.set(item.n, {
+        n: item.n,
+        prompt: cleaned,
+        status: "rewritten",
+        reason: previous.reason ?? "did not match its timestamp",
+      });
     });
   } catch (error) {
     console.error(
-      `[verify] batch rewrite failed: ${error instanceof Error ? error.message : String(error)}`,
+      `[verify] batch audit failed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+
 
   // Anything still unusable gets one focused single-line rewrite from the
   // ordinary prompt writer, so no timestamp is left without a prompt.
