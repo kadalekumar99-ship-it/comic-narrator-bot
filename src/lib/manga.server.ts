@@ -1827,8 +1827,9 @@ export async function renderPanel(
     for (let round = 0; round < (refused ? 3 : 2); round++) {
       tries++;
       try {
+        const scenePrompt = lastVerdict ? correctiveVariant(softened, lastVerdict) : softened;
         const url = await generateImage(
-          softened,
+          scenePrompt,
           seed + 5471 + round * 977,
           slot + round,
           bible,
@@ -1836,7 +1837,13 @@ export async function renderPanel(
           line,
           continuity,
         );
-        return { url, prompt: softened, level: 1, tries, rewritten };
+        const verdict = await reviewPanelImage(url, `${line ? `${line}. ` : ""}${prompt}`);
+        if (verdict && !verdict.ok) {
+          lastVerdict = verdict.reason;
+          errors.push(`softened review rejected round ${round + 1}: ${verdict.reason}`);
+          continue;
+        }
+        return { url, prompt: scenePrompt, level: 1, tries, rewritten };
       } catch (e) {
         if (e instanceof KilledError) throw e;
         errors.push(`softened ${round + 1}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1856,8 +1863,15 @@ export async function renderPanel(
     for (let round = 0; round < 3; round++) {
       tries++;
       try {
-        const url = await generateImage(plain, seed + 9109 + round * 613, slot + round, bible, 3, line, continuity);
-        return { url, prompt: plain, level: 2, tries, rewritten };
+        const scenePrompt = lastVerdict ? correctiveVariant(plain, lastVerdict) : plain;
+        const url = await generateImage(scenePrompt, seed + 9109 + round * 613, slot + round, bible, 3, line, continuity);
+        const verdict = await reviewPanelImage(url, `${line ? `${line}. ` : ""}${prompt}`);
+        if (verdict && !verdict.ok) {
+          lastVerdict = verdict.reason;
+          errors.push(`plain review rejected round ${round + 1}: ${verdict.reason}`);
+          continue;
+        }
+        return { url, prompt: scenePrompt, level: 2, tries, rewritten };
       } catch (e) {
         if (e instanceof KilledError) throw e;
         errors.push(`plain ${round + 1}: ${e instanceof Error ? e.message : String(e)}`);
