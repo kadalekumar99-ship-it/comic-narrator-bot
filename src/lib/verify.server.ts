@@ -77,6 +77,32 @@ function auditInstruction(bible: string, items: VerifyItem[]): string {
 }
 
 /**
+ * Maps an audit answer back to the global timestamp numbers it was asked for.
+ * Later batches are numbered 11-20, 21-30, etc.; parsing them with the batch
+ * size (10) used to discard those global numbers and silently keep unchecked
+ * prompts. A positional 1..N answer is accepted only as an explicit fallback.
+ */
+export function parseAuditPrompts(raw: string, items: VerifyItem[]): Map<number, string> {
+  const mapped = new Map<number, string>();
+  if (items.length === 0) return mapped;
+
+  const highest = Math.max(...items.map((item) => item.n));
+  const global = parseNumberedList(raw, highest);
+  for (const item of items) {
+    const candidate = global[item.n - 1]?.trim();
+    if (candidate) mapped.set(item.n, candidate);
+  }
+  if (mapped.size > 0) return mapped;
+
+  const positional = parseNumberedList(raw, items.length);
+  items.forEach((item, index) => {
+    const candidate = positional[index]?.trim();
+    if (candidate) mapped.set(item.n, candidate);
+  });
+  return mapped;
+}
+
+/**
  * Verifies one batch of already-written prompts, rewriting the bad ones.
  * The batch is checked entry by entry; a rewrite is accepted only when it
  * passes the same per-timestamp checks the original failed.
@@ -107,9 +133,9 @@ export async function verifyPromptBatch(
       temperature: 0.5,
       maxOutputTokens: Math.min(20_000, 400 * items.length + 800),
     });
-    const parsed = parseNumberedList(raw, items.length);
-    items.forEach((item, i) => {
-      const candidate = (parsed[i] ?? "").trim();
+    const parsed = parseAuditPrompts(raw, items);
+    items.forEach((item) => {
+      const candidate = parsed.get(item.n) ?? "";
       if (!candidate) return;
       const cleaned = sanitizePrompt(candidate);
       const problem = localCheck({ ...item, prompt: cleaned });
