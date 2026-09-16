@@ -352,13 +352,31 @@ export function visionModel(): string {
   return process.env["ZAI_VISION_MODEL"]?.trim() || "glm-4.6v-flash";
 }
 
-/** Reviews run beside renders, so they get their own tiny gate (never the text queue). */
+/** Reviews run beside renders, so they get their own gate (never the text queue). */
 const MAX_VISION_IN_FLIGHT = 3;
 let visionInFlight = 0;
+let visionBlockedUntil = 0;
+
+/**
+ * Wait for review capacity instead of skipping quality control. The old
+ * `visionInFlight >= 3` early return meant that a burst of 20+ renders left
+ * most later panels completely unchecked.
+ */
+async function acquireVisionSlot(): Promise<void> {
+  for (;;) {
+    assertActive();
+    const wait = Math.max(visionBlockedUntil - Date.now(), 0);
+    if (visionInFlight < MAX_VISION_IN_FLIGHT && wait <= 0) {
+      visionInFlight++;
+      return;
+    }
+    await backoff(Math.max(250, Math.min(wait, 2_000)));
+  }
+}
 
 export type ImageVerdict = {
   ok: boolean;
-  /** Short machine reason: sketch | sheet | wrong_scene | no_background | facing_viewer | duplicate | underage_lead | text */
+  /** Short machine reason describing the rejected visual defect. */
   reason: string;
 };
 
@@ -376,10 +394,7 @@ export async function reviewPanelImage(
   sceneBrief: string,
 ): Promise<ImageVerdict | null> {
   if (process.env["IMAGE_REVIEW"]?.trim() === "off") return null;
-  // The account is already rate limited: reviewing now would only deepen it.
-  if (Date.now() < blockedUntil) return null;
-  if (visionInFlight >= MAX_VISION_IN_FLIGHT) return null;
-  visionInFlight++;
+  await acquireVisionSlot();
   const instruction =
     "You are a strict storyboard quality checker for a finished anime story panel.\n" +
     `INTENDED SCENE: ${sceneBrief.slice(0, 700)}\n\n` +
@@ -389,6 +404,7 @@ export async function reviewPanelImage(
     "no_background — blank, white, flat or nearly empty background instead of a real location;\n" +
     "facing_viewer — the characters pose front-on staring at the viewer instead of acting in the story;\n" +
     "duplicate — the same character drawn more than once, or fused/merged bodies;\n" +
+    "bad_crop — an important character's head or face is accidentally cut off, or the composition shows unusable partial bodies;\n" +
     "underage_lead — the intended scene identifies the main protagonist as a 23-year-old unmarried young man, but he visibly looks like a 14–16-year-old boy or child;\n" +
     "wrong_scene — the picture does not show the intended location, cast or action;\n" +
     "text — visible lettering, captions or speech balloons.\n\n" +
@@ -430,9 +446,14 @@ export async function reviewPanelImage(
             await backoff(jitter(4_000 * (attempt + 1)));
             continue;
           }
-          // A real rate-limit block applies to the whole account: hold back.
+          // Review traffic has its own cooldown. A text-model overload must
+          // never disable visual checks for the rest of a long run.
           if (!overloaded && busy(res.status, body)) {
-            blockedUntil = Math.max(blockedUntil, Date.now() + 30_000);
+            const retryAfter = Number(res.headers.get("retry-after") ?? 0);
+            visionBlockedUntil = Math.max(
+              visionBlockedUntil,
+              Date.now() + (retryAfter > 0 ? retryAfter * 1000 : 30_000),
+            );
           }
           return null;
         }

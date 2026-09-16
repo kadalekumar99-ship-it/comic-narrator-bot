@@ -1721,6 +1721,8 @@ export function correctiveVariant(prompt: string, reason: string): string {
     facing_viewer:
       "characters turned into the scene at a three-quarter or profile angle, eyes on each other or on what they handle",
     duplicate: "each named person appears exactly once, whole separate bodies, clearly spaced apart",
+    bad_crop:
+      "a balanced medium or wide composition with every important character's complete head, face and body clearly inside the frame",
     underage_lead:
       "the main protagonist is unmistakably an adult 23-year-old unmarried young man, with mature adult facial proportions and adult height and build",
     wrong_scene: "exactly the location, cast and action described above and nothing else",
@@ -1783,11 +1785,9 @@ export async function renderPanel(
   // flaky renderer is worked through instead of failing the panel.
   let refused = false;
   let lastVerdict = "";
-  // Automatic image review may reject a first render (sketch, character sheet,
-  // blank background, everyone facing the viewer, wrong scene). One corrective
-  // redraw is allowed; after that the panel is kept so a run always finishes.
-  let reviewsLeft = 1;
-  let firstUrl: string | null = null;
+  // Every candidate is reviewed. Previously only the first candidate was
+  // checked, and a known-bad first render was returned when the correction
+  // failed; long runs therefore accumulated guaranteed bad panels.
   for (let round = 0; round < 3; round++) {
     tries++;
     try {
@@ -1802,17 +1802,13 @@ export async function renderPanel(
         line,
         continuity,
       );
-      if (!firstUrl) firstUrl = url;
-      if (reviewsLeft > 0) {
-        const verdict = await reviewPanelImage(url, `${line ? `${line}. ` : ""}${prompt}`);
-        if (verdict && !verdict.ok) {
-          reviewsLeft--;
-          lastVerdict = verdict.reason;
-          errors.push(`review rejected round ${round + 1}: ${verdict.reason}`);
-          console.warn(`[review] panel redrawn — ${verdict.reason}`);
-          await pause(200);
-          continue;
-        }
+      const verdict = await reviewPanelImage(url, `${line ? `${line}. ` : ""}${prompt}`);
+      if (verdict && !verdict.ok) {
+        lastVerdict = verdict.reason;
+        errors.push(`review rejected round ${round + 1}: ${verdict.reason}`);
+        console.warn(`[review] panel rejected — ${verdict.reason}`);
+        await pause(200);
+        continue;
       }
       return { url, prompt: scenePrompt, level: 0, tries, rewritten };
     } catch (e) {
@@ -1823,10 +1819,6 @@ export async function renderPanel(
     }
     await pause(400 * (round + 1));
   }
-  // Review rejected it but nothing better came back: a reviewed panel still
-  // beats an empty slot in the storyboard.
-  if (firstUrl) return { url: firstUrl, prompt, level: 0, tries, rewritten };
-
   // Stage 2 — softened wording (same scene, same length). Tried whenever the
   // full prompt could not be rendered, not only on an explicit refusal: a free
   // renderer often reports a content block as a plain failure.
@@ -1835,8 +1827,9 @@ export async function renderPanel(
     for (let round = 0; round < (refused ? 3 : 2); round++) {
       tries++;
       try {
+        const scenePrompt = lastVerdict ? correctiveVariant(softened, lastVerdict) : softened;
         const url = await generateImage(
-          softened,
+          scenePrompt,
           seed + 5471 + round * 977,
           slot + round,
           bible,
@@ -1844,7 +1837,13 @@ export async function renderPanel(
           line,
           continuity,
         );
-        return { url, prompt: softened, level: 1, tries, rewritten };
+        const verdict = await reviewPanelImage(url, `${line ? `${line}. ` : ""}${prompt}`);
+        if (verdict && !verdict.ok) {
+          lastVerdict = verdict.reason;
+          errors.push(`softened review rejected round ${round + 1}: ${verdict.reason}`);
+          continue;
+        }
+        return { url, prompt: scenePrompt, level: 1, tries, rewritten };
       } catch (e) {
         if (e instanceof KilledError) throw e;
         errors.push(`softened ${round + 1}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1864,8 +1863,15 @@ export async function renderPanel(
     for (let round = 0; round < 3; round++) {
       tries++;
       try {
-        const url = await generateImage(plain, seed + 9109 + round * 613, slot + round, bible, 3, line, continuity);
-        return { url, prompt: plain, level: 2, tries, rewritten };
+        const scenePrompt = lastVerdict ? correctiveVariant(plain, lastVerdict) : plain;
+        const url = await generateImage(scenePrompt, seed + 9109 + round * 613, slot + round, bible, 3, line, continuity);
+        const verdict = await reviewPanelImage(url, `${line ? `${line}. ` : ""}${prompt}`);
+        if (verdict && !verdict.ok) {
+          lastVerdict = verdict.reason;
+          errors.push(`plain review rejected round ${round + 1}: ${verdict.reason}`);
+          continue;
+        }
+        return { url, prompt: scenePrompt, level: 2, tries, rewritten };
       } catch (e) {
         if (e instanceof KilledError) throw e;
         errors.push(`plain ${round + 1}: ${e instanceof Error ? e.message : String(e)}`);
